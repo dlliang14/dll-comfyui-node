@@ -352,39 +352,12 @@ class FFmpegBatchConvertNode:
             index += 1
         return candidate
 
-<<<<<<< HEAD
-=======
-
-class DebugStringOutputNode:
-    """Workflow terminal output node for debugging string results."""
-
-    @classmethod
-    def INPUT_TYPES(cls):
-        return {
-            "required": {
-                "text": ("STRING", {"default": "", "multiline": True}),
-            }
-        }
-
-    RETURN_TYPES = ()
-    FUNCTION = "run"
-    OUTPUT_NODE = True
-    CATEGORY = "dlliang14/debug"
-
-    def run(self, text: str):
-        print(f"[DebugStringOutputNode]\n{text}")
-        return ()
-
-
->>>>>>> origin/main
 NODE_CLASS_MAPPINGS = {
     "OSSInfoNode": OSSInfoNode,
     "FFmpegBatchConvertNode": FFmpegBatchConvertNode,
-    "DebugStringOutputNode": DebugStringOutputNode,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "OSSInfoNode": "OSS Configuration",
     "FFmpegBatchConvertNode": "FFmpeg Batch Convert (Video -> Audio)",
-    "DebugStringOutputNode": "Debug String Output",
 }

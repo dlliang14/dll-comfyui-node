@@ -55,7 +55,13 @@ class ParaformerBatchASRNode:
         poll_interval_sec: int,
         timeout_sec: int,
         api_key: str = "",
+        oss_config_json: str = "",
+        public_base_url: str = "",
+        **kwargs: Any,
     ):
+        # backward compatibility for old workflows
+        _ = (oss_config_json, public_base_url, kwargs)
+
         try:
             import dashscope
             from dashscope.audio.asr import Transcription
@@ -165,9 +171,9 @@ class ParaformerBatchASRNode:
         ]
         if invalid:
             raise ValueError(
-                "audio_urls must be public or presigned HTTP/HTTPS URLs, one per line. "
+                "audio_urls must be public HTTP/HTTPS URLs, one per line. "
                 f"Invalid entries: {invalid[:3]}. "
-                "If input comes from media node, set oss_output_mode=presigned_url."
+                "If input comes from media node, set oss_output_mode=public_url."
             )
         return resolved
 

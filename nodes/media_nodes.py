@@ -108,11 +108,7 @@ class FFmpegBatchConvertNode:
                     "STRING",
                     {"default": "/root/ComfyUI/output/", "multiline": False},
                 ),
-                "oss_output_mode": (("oss_key", "presigned_url"),),
-                "presigned_expires_sec": (
-                    "INT",
-                    {"default": 3600, "min": 60, "max": 86400},
-                ),
+                "oss_output_mode": (("public_url", "oss_key"),),
             },
         }
 
@@ -138,9 +134,12 @@ class FFmpegBatchConvertNode:
         oss_config_json: str = "",
         use_local_output: bool = True,
         local_output_dir: str = "/root/ComfyUI/output/",
-        oss_output_mode: str = "presigned_url",
+        oss_output_mode: str = "public_url",
         presigned_expires_sec: int = 3600,
     ):
+        # backward compatibility for old workflow fields
+        _ = presigned_expires_sec
+
         ffmpeg_exe = self._resolve_ffmpeg_executable(ffmpeg_path)
         input_files = self._resolve_input_files(
             input_mode=input_mode,
@@ -272,15 +271,13 @@ class FFmpegBatchConvertNode:
                 if use_oss:
                     assert dst_oss_path is not None
                     assert oss_config is not None
-                    if oss_output_mode == "presigned_url":
-                        signed_url = self._generate_presigned_get_url(
+                    if oss_output_mode == "oss_key":
+                        output_path = dst_oss_path
+                    else:
+                        output_path = self._build_public_object_url(
                             oss_config=oss_config,
                             oss_key=dst_oss_path,
-                            expires_sec=presigned_expires_sec,
                         )
-                        output_path = signed_url or dst_oss_path
-                    else:
-                        output_path = dst_oss_path
                 else:
                     output_path = str(dst_path)
                 assert output_path is not None
@@ -469,60 +466,25 @@ class FFmpegBatchConvertNode:
             raise last_error
 
     @staticmethod
-    def _generate_presigned_get_url(
+    def _build_public_object_url(
         oss_config: dict,
         oss_key: str,
-        expires_sec: int,
     ) -> str:
         endpoint = str(oss_config.get("endpoint", "")).strip()
-        access_key_id = str(oss_config.get("access_key_id", "")).strip()
-        access_key_secret = str(oss_config.get("access_key_secret", "")).strip()
         bucket_name = str(oss_config.get("bucket_name", "")).strip()
-        region_name = str(oss_config.get("region_name", "auto")).strip() or "auto"
 
-        if (
-            not endpoint
-            or not access_key_id
-            or not access_key_secret
-            or not bucket_name
-        ):
-            return ""
+        if not endpoint or not bucket_name:
+            return oss_key
 
         key = oss_key.lstrip("/")
+        endpoint = endpoint.rstrip("/")
 
-        base_config = {
-            "signature_version": "s3v4",
-            "request_checksum_calculation": "when_required",
-            "response_checksum_validation": "when_required",
-        }
+        # endpoint already bucket-style, e.g. https://my-bucket.oss-cn-shanghai.aliyuncs.com
+        if f"//{bucket_name}." in endpoint:
+            return f"{endpoint}/{key}"
 
-        for addressing_style in ("virtual", "path"):
-            try:
-                s3 = boto3.client(
-                    "s3",
-                    endpoint_url=endpoint,
-                    aws_access_key_id=access_key_id,
-                    aws_secret_access_key=access_key_secret,
-                    region_name=region_name,
-                    config=Config(
-                        **base_config,
-                        s3={
-                            "addressing_style": addressing_style,
-                            "payload_signing_enabled": False,
-                        },
-                    ),
-                )
-                return str(
-                    s3.generate_presigned_url(
-                        "get_object",
-                        Params={"Bucket": bucket_name, "Key": key},
-                        ExpiresIn=int(expires_sec),
-                    )
-                )
-            except Exception:
-                continue
-
-        return ""
+        # path-style endpoint, append bucket once
+        return f"{endpoint}/{bucket_name}/{key}"
 
 
 NODE_CLASS_MAPPINGS = {

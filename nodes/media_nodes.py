@@ -19,7 +19,7 @@ class FFmpegBatchConvertNode:
                 "input_mode": (["directory", "list", "single"],),
                 "source_path": (
                     "STRING",
-                    {"default": "/data/input", "multiline": False},
+                    {"default": "/root/ComfyUI/input/", "multiline": False},
                 ),
                 "file_list": (
                     "STRING",
@@ -33,7 +33,7 @@ class FFmpegBatchConvertNode:
                 "recursive": ("BOOLEAN", {"default": False}),
                 "output_dir": (
                     "STRING",
-                    {"default": "/data/output", "multiline": False},
+                    {"default": "/root/ComfyUI/output/", "multiline": False},
                 ),
                 "output_format": (["mp3", "wav"],),
                 "sample_rate": ("INT", {"default": 44100, "min": 8000, "max": 192000}),

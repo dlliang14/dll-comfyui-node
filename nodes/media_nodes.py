@@ -5,7 +5,7 @@ import os
 import subprocess
 import uuid
 from pathlib import Path
-from typing import Any, Dict, Iterable, List
+from typing import Iterable, List
 
 import imageio_ffmpeg
 
@@ -85,7 +85,13 @@ class FFmpegBatchConvertNode:
                         "multiline": True,
                         "placeholder": "list mode: one absolute path per line",
                     },
-                ),format": (["mp3", "wav"],),
+                ),
+                "glob_pattern": (
+                    "STRING",
+                    {"default": "*.mp4", "multiline": False},
+                ),
+                "recursive": ("BOOLEAN", {"default": False}),
+                "output_format": (["mp3", "wav"],),
                 "sample_rate": ("INT", {"default": 44100, "min": 8000, "max": 192000}),
                 "channels": ("INT", {"default": 2, "min": 1, "max": 2}),
                 "audio_bitrate": ("STRING", {"default": "192k", "multiline": False}),
@@ -100,10 +106,7 @@ class FFmpegBatchConvertNode:
                     "STRING",
                     {"default": "/root/ComfyUI/output/", "multiline": False},
                 ),
-            },   "overwrite": (["skip", "overwrite", "rename"],),
-                "continue_on_error": ("BOOLEAN", {"default": True}),
-                "ffmpeg_path": ("STRING", {"default": "", "multiline": False}),
-            }
+            },
         }
 
     RETURN_TYPES = ("STRING", "INT", "INT", "STRING")
@@ -171,9 +174,11 @@ class FFmpegBatchConvertNode:
         }
 
         if use_oss:
+            assert oss_config is not None
             report["oss_bucket"] = oss_config.get("bucket_name")
             report["oss_prefix"] = oss_config.get("path_prefix")
         else:
+            assert output_root is not None
             report["output_dir"] = str(output_root)
 
         for src in input_files:
@@ -194,6 +199,7 @@ class FFmpegBatchConvertNode:
             # Generate output filename
             if use_oss:
                 # OSS path: bucket://prefix/uuid.format
+                assert oss_config is not None
                 file_uuid = str(uuid.uuid4())
                 dst_filename = f"{file_uuid}.{output_format}"
                 dst_oss_path = f"{oss_config['path_prefix']}{dst_filename}"
@@ -201,6 +207,7 @@ class FFmpegBatchConvertNode:
                 dst_path = Path(local_output_dir).expanduser() / dst_filename
                 dst_path.parent.mkdir(parents=True, exist_ok=True)
             else:
+                assert output_root is not None
                 dst_path = output_root / f"{src_path.stem}.{output_format}"
                 dst_oss_path = None
 
@@ -233,6 +240,7 @@ class FFmpegBatchConvertNode:
             if result.returncode == 0:
                 success_count += 1
                 output_path = dst_oss_path if use_oss else str(dst_path)
+                assert output_path is not None
                 converted_files.append(output_path)
                 report["items"].append(
                     {
@@ -351,6 +359,7 @@ class FFmpegBatchConvertNode:
             candidate = path.with_name(f"{path.stem}_{index}{path.suffix}")
             index += 1
         return candidate
+
 
 NODE_CLASS_MAPPINGS = {
     "OSSInfoNode": OSSInfoNode,

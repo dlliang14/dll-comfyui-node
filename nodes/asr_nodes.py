@@ -5,6 +5,8 @@ import os
 import time
 from http import HTTPStatus
 from typing import Any, Dict, List, Optional, Tuple
+from urllib.error import URLError
+from urllib.request import urlopen
 
 
 class ParaformerBatchASRNode:
@@ -129,6 +131,8 @@ class ParaformerBatchASRNode:
                     )
 
                 text, result_url = self._extract_text_and_url(result)
+                if not result_url:
+                    raise RuntimeError("Missing transcription_url in ASR response")
                 texts.append(text)
                 transcription_urls.append(result_url)
                 report["items"].append(
@@ -229,16 +233,11 @@ class ParaformerBatchASRNode:
 
     @staticmethod
     def _extract_text_and_url(response: Any) -> Tuple[str, str]:
-        output = getattr(response, "output", None)
+        output = ParaformerBatchASRNode._safe_get_attr(response, "output")
         if output is None:
             return "", ""
 
-        if hasattr(output, "to_dict"):
-            payload = output.to_dict()
-        elif isinstance(output, dict):
-            payload = output
-        else:
-            payload = vars(output)
+        payload = ParaformerBatchASRNode._to_mapping(output)
 
         text = str(payload.get("text", "") or "")
         url = str(
@@ -248,17 +247,27 @@ class ParaformerBatchASRNode:
             or ""
         )
 
-        if not text:
-            results = payload.get("results") or payload.get("result")
-            if isinstance(results, list) and results:
-                first = results[0] if isinstance(results[0], dict) else {}
-                text = str(first.get("text", "") or "")
-                url = url or str(
+        # Task-level response schema (contains results list with per-file status/url).
+        results = payload.get("results") or payload.get("result")
+        if isinstance(results, list) and results:
+            first = results[0] if isinstance(results[0], dict) else {}
+            subtask_status = str(first.get("subtask_status", "") or "")
+            if subtask_status == "FAILED":
+                code = str(first.get("code", "") or "")
+                message = str(first.get("message", "") or "")
+                raise RuntimeError(f"Subtask failed: {code} {message}".strip())
+
+            if not url:
+                url = str(
                     first.get("transcription_url")
                     or first.get("url")
                     or first.get("result_url")
                     or ""
                 )
+
+        # Detail-response schema might already contain transcripts.
+        if not text:
+            text = ParaformerBatchASRNode._extract_text_from_transcript_payload(payload)
 
         if not text:
             sentence_list = payload.get("sentence_list") or payload.get("sentences")
@@ -268,6 +277,14 @@ class ParaformerBatchASRNode:
                     if isinstance(sentence, dict) and sentence.get("text"):
                         parts.append(str(sentence["text"]))
                 text = "".join(parts)
+
+        # If only got transcription_url, fetch detail JSON to extract final text.
+        if not text and url:
+            detail_payload = ParaformerBatchASRNode._download_transcription_payload(url)
+            if detail_payload:
+                text = ParaformerBatchASRNode._extract_text_from_transcript_payload(
+                    detail_payload
+                )
 
         return text, url
 
@@ -280,8 +297,83 @@ class ParaformerBatchASRNode:
             if isinstance(cur, dict):
                 cur = cur.get(key)
             else:
-                cur = getattr(cur, key, None)
+                cur = ParaformerBatchASRNode._safe_get_attr(cur, key)
         return cur
+
+    @staticmethod
+    def _safe_get_attr(obj: Any, name: str) -> Optional[Any]:
+        try:
+            return getattr(obj, name)
+        except Exception:
+            return None
+
+    @staticmethod
+    def _to_mapping(obj: Any) -> Dict[str, Any]:
+        if isinstance(obj, dict):
+            return obj
+
+        try:
+            to_dict_fn = getattr(obj, "to_dict")
+            if callable(to_dict_fn):
+                converted = to_dict_fn()
+                if isinstance(converted, dict):
+                    return converted
+        except Exception:
+            pass
+
+        try:
+            data = vars(obj)
+            if isinstance(data, dict):
+                return data
+        except Exception:
+            pass
+
+        return {}
+
+    @staticmethod
+    def _download_transcription_payload(url: str) -> Dict[str, Any]:
+        try:
+            with urlopen(url, timeout=30) as resp:
+                raw = resp.read().decode("utf-8")
+            payload = json.loads(raw)
+            if isinstance(payload, dict):
+                return payload
+        except (URLError, TimeoutError, ValueError, OSError):
+            return {}
+        return {}
+
+    @staticmethod
+    def _extract_text_from_transcript_payload(payload: Dict[str, Any]) -> str:
+        # Success detail example: {"transcripts": [{"text": "..."}]}
+        transcripts = payload.get("transcripts")
+        if isinstance(transcripts, list) and transcripts:
+            lines: List[str] = []
+            for transcript in transcripts:
+                if not isinstance(transcript, dict):
+                    continue
+                if transcript.get("text"):
+                    lines.append(str(transcript["text"]))
+                    continue
+                sentences = transcript.get("sentences")
+                if isinstance(sentences, list):
+                    sentence_text = "".join(
+                        str(s.get("text", "")) for s in sentences if isinstance(s, dict)
+                    )
+                    if sentence_text:
+                        lines.append(sentence_text)
+            if lines:
+                return "\n".join(lines)
+
+        # Some responses may contain top-level sentence list.
+        sentence_list = payload.get("sentence_list") or payload.get("sentences")
+        if isinstance(sentence_list, list):
+            return "".join(
+                str(sentence.get("text", ""))
+                for sentence in sentence_list
+                if isinstance(sentence, dict)
+            )
+
+        return str(payload.get("text", "") or "")
 
 
 NODE_CLASS_MAPPINGS = {

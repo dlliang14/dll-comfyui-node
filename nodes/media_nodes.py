@@ -135,11 +135,7 @@ class FFmpegBatchConvertNode:
         use_local_output: bool = True,
         local_output_dir: str = "/root/ComfyUI/output/",
         oss_output_mode: str = "public_url",
-        presigned_expires_sec: int = 3600,
     ):
-        # backward compatibility for old workflow fields
-        _ = presigned_expires_sec
-
         ffmpeg_exe = self._resolve_ffmpeg_executable(ffmpeg_path)
         input_files = self._resolve_input_files(
             input_mode=input_mode,

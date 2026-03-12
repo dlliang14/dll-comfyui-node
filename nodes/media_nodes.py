@@ -9,6 +9,7 @@ from typing import Iterable, List
 
 import boto3
 import imageio_ffmpeg
+from botocore.config import Config
 
 
 class OSSInfoNode:
@@ -242,6 +243,7 @@ class FFmpegBatchConvertNode:
                 # Upload to OSS if configured
                 if use_oss:
                     assert oss_config is not None
+                    assert dst_oss_path is not None
                     try:
                         self._upload_to_s3(oss_config, dst_path, dst_oss_path)
                         dst_path.unlink(missing_ok=True)  # remove temp file
@@ -391,14 +393,57 @@ class FFmpegBatchConvertNode:
             access_key_secret - Access Key Secret
             bucket_name      - target bucket
         """
-        s3 = boto3.client(
-            "s3",
-            endpoint_url=oss_config["endpoint"],
-            aws_access_key_id=oss_config["access_key_id"],
-            aws_secret_access_key=oss_config["access_key_secret"],
-            region_name="auto",
-        )
-        s3.upload_file(str(local_path), oss_config["bucket_name"], oss_key)
+        endpoint = str(oss_config.get("endpoint", "")).strip()
+        access_key_id = str(oss_config.get("access_key_id", "")).strip()
+        access_key_secret = str(oss_config.get("access_key_secret", "")).strip()
+        bucket_name = str(oss_config.get("bucket_name", "")).strip()
+        region_name = str(oss_config.get("region_name", "auto")).strip() or "auto"
+
+        if (
+            not endpoint
+            or not access_key_id
+            or not access_key_secret
+            or not bucket_name
+        ):
+            raise ValueError(
+                "Invalid OSS config: endpoint/access_key_id/access_key_secret/bucket_name are required"
+            )
+
+        key = oss_key.lstrip("/")
+        body = local_path.read_bytes()
+
+        # For Aliyun OSS/S3-compatible services, avoid aws-chunked streaming upload.
+        # Use direct put_object with payload signing disabled and checksum policy relaxed.
+        base_config = {
+            "signature_version": "s3v4",
+            "request_checksum_calculation": "when_required",
+            "response_checksum_validation": "when_required",
+        }
+
+        last_error: Exception | None = None
+        for addressing_style in ("virtual", "path"):
+            try:
+                s3 = boto3.client(
+                    "s3",
+                    endpoint_url=endpoint,
+                    aws_access_key_id=access_key_id,
+                    aws_secret_access_key=access_key_secret,
+                    region_name=region_name,
+                    config=Config(
+                        **base_config,
+                        s3={
+                            "addressing_style": addressing_style,
+                            "payload_signing_enabled": False,
+                        },
+                    ),
+                )
+                s3.put_object(Bucket=bucket_name, Key=key, Body=body)
+                return
+            except Exception as exc:  # pragma: no cover
+                last_error = exc
+
+        if last_error is not None:
+            raise last_error
 
 
 NODE_CLASS_MAPPINGS = {

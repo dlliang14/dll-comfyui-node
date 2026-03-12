@@ -1,3 +1,4 @@
-.github*
+.github/prompts*
 .vscode*
 *.pyc
+*.zip

@@ -3,10 +3,67 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import uuid
 from pathlib import Path
-from typing import Iterable, List
+from typing import Any, Dict, Iterable, List
 
 import imageio_ffmpeg
+
+
+class OSSInfoNode:
+    """OSS configuration node - provides endpoint, credentials, and bucket info for other nodes."""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "endpoint": (
+                    "STRING",
+                    {
+                        "default": "https://oss-cn-beijing.aliyuncs.com",
+                        "multiline": False,
+                    },
+                ),
+                "access_key_id": (
+                    "STRING",
+                    {"default": "", "multiline": False},
+                ),
+                "access_key_secret": (
+                    "STRING",
+                    {"default": "", "multiline": False},
+                ),
+                "bucket_name": (
+                    "STRING",
+                    {"default": "", "multiline": False},
+                ),
+                "path_prefix": (
+                    "STRING",
+                    {"default": "comfyui/output/", "multiline": False},
+                ),
+            }
+        }
+
+    RETURN_TYPES = ("STRING",)
+    RETURN_NAMES = ("oss_config_json",)
+    FUNCTION = "get_config"
+    CATEGORY = "dlliang14/oss"
+
+    def get_config(
+        self,
+        endpoint: str,
+        access_key_id: str,
+        access_key_secret: str,
+        bucket_name: str,
+        path_prefix: str,
+    ):
+        config = {
+            "endpoint": endpoint.strip(),
+            "access_key_id": access_key_id.strip(),
+            "access_key_secret": access_key_secret.strip(),
+            "bucket_name": bucket_name.strip(),
+            "path_prefix": path_prefix.rstrip("/") + "/",
+        }
+        return (json.dumps(config, ensure_ascii=False),)
 
 
 class FFmpegBatchConvertNode:
@@ -28,18 +85,22 @@ class FFmpegBatchConvertNode:
                         "multiline": True,
                         "placeholder": "list mode: one absolute path per line",
                     },
-                ),
-                "glob_pattern": ("STRING", {"default": "*.mp4", "multiline": False}),
-                "recursive": ("BOOLEAN", {"default": False}),
-                "output_dir": (
-                    "STRING",
-                    {"default": "/root/ComfyUI/output/", "multiline": False},
-                ),
-                "output_format": (["mp3", "wav"],),
+                ),format": (["mp3", "wav"],),
                 "sample_rate": ("INT", {"default": 44100, "min": 8000, "max": 192000}),
                 "channels": ("INT", {"default": 2, "min": 1, "max": 2}),
                 "audio_bitrate": ("STRING", {"default": "192k", "multiline": False}),
                 "overwrite": (["skip", "overwrite", "rename"],),
+                "continue_on_error": ("BOOLEAN", {"default": True}),
+                "ffmpeg_path": ("STRING", {"default": "", "multiline": False}),
+            },
+            "optional": {
+                "oss_config_json": ("STRING", {"default": ""}),
+                "use_local_output": ("BOOLEAN", {"default": True}),
+                "local_output_dir": (
+                    "STRING",
+                    {"default": "/root/ComfyUI/output/", "multiline": False},
+                ),
+            },   "overwrite": (["skip", "overwrite", "rename"],),
                 "continue_on_error": ("BOOLEAN", {"default": True}),
                 "ffmpeg_path": ("STRING", {"default": "", "multiline": False}),
             }
@@ -57,7 +118,6 @@ class FFmpegBatchConvertNode:
         file_list: str,
         glob_pattern: str,
         recursive: bool,
-        output_dir: str,
         output_format: str,
         sample_rate: int,
         channels: int,
@@ -65,6 +125,9 @@ class FFmpegBatchConvertNode:
         overwrite: str,
         continue_on_error: bool,
         ffmpeg_path: str,
+        oss_config_json: str = "",
+        use_local_output: bool = True,
+        local_output_dir: str = "/root/ComfyUI/output/",
     ):
         ffmpeg_exe = self._resolve_ffmpeg_executable(ffmpeg_path)
         input_files = self._resolve_input_files(
@@ -75,8 +138,26 @@ class FFmpegBatchConvertNode:
             recursive=recursive,
         )
 
-        output_root = Path(output_dir).expanduser().resolve()
-        output_root.mkdir(parents=True, exist_ok=True)
+        # Parse OSS config if provided
+        oss_config = None
+        if oss_config_json and oss_config_json.strip():
+            try:
+                oss_config = json.loads(oss_config_json)
+            except json.JSONDecodeError:
+                raise ValueError(f"Invalid OSS config JSON: {oss_config_json}")
+
+        # Determine output directory
+        if use_local_output and not oss_config:
+            output_root = Path(local_output_dir).expanduser().resolve()
+            output_root.mkdir(parents=True, exist_ok=True)
+            use_oss = False
+        elif oss_config:
+            use_oss = True
+            output_root = None  # OSS paths will be generated on the fly
+        else:
+            output_root = Path(local_output_dir).expanduser().resolve()
+            output_root.mkdir(parents=True, exist_ok=True)
+            use_oss = False
 
         converted_files: List[str] = []
         success_count = 0
@@ -84,10 +165,16 @@ class FFmpegBatchConvertNode:
         report = {
             "input_mode": input_mode,
             "output_format": output_format,
-            "output_dir": str(output_root),
+            "use_oss": use_oss,
             "total_inputs": len(input_files),
             "items": [],
         }
+
+        if use_oss:
+            report["oss_bucket"] = oss_config.get("bucket_name")
+            report["oss_prefix"] = oss_config.get("path_prefix")
+        else:
+            report["output_dir"] = str(output_root)
 
         for src in input_files:
             src_path = Path(src).expanduser().resolve()
@@ -104,8 +191,20 @@ class FFmpegBatchConvertNode:
                     raise RuntimeError(f"Input file not found: {src_path}")
                 continue
 
-            dst_path = output_root / f"{src_path.stem}.{output_format}"
-            if dst_path.exists():
+            # Generate output filename
+            if use_oss:
+                # OSS path: bucket://prefix/uuid.format
+                file_uuid = str(uuid.uuid4())
+                dst_filename = f"{file_uuid}.{output_format}"
+                dst_oss_path = f"{oss_config['path_prefix']}{dst_filename}"
+                # Local temp file for ffmpeg output
+                dst_path = Path(local_output_dir).expanduser() / dst_filename
+                dst_path.parent.mkdir(parents=True, exist_ok=True)
+            else:
+                dst_path = output_root / f"{src_path.stem}.{output_format}"
+                dst_oss_path = None
+
+            if not use_oss and dst_path.exists():
                 if overwrite == "skip":
                     report["items"].append(
                         {
@@ -127,17 +226,18 @@ class FFmpegBatchConvertNode:
                 sample_rate=sample_rate,
                 channels=channels,
                 audio_bitrate=audio_bitrate,
-                overwrite=(overwrite == "overwrite"),
+                overwrite=(overwrite == "overwrite" or use_oss),
             )
 
             result = subprocess.run(command, capture_output=True, text=True)
             if result.returncode == 0:
                 success_count += 1
-                converted_files.append(str(dst_path))
+                output_path = dst_oss_path if use_oss else str(dst_path)
+                converted_files.append(output_path)
                 report["items"].append(
                     {
                         "input": str(src_path),
-                        "output": str(dst_path),
+                        "output": output_path,
                         "status": "success",
                     }
                 )
@@ -146,7 +246,7 @@ class FFmpegBatchConvertNode:
                 report["items"].append(
                     {
                         "input": str(src_path),
-                        "output": str(dst_path),
+                        "output": dst_oss_path if use_oss else str(dst_path),
                         "status": "failed",
                         "error": (result.stderr or result.stdout).strip(),
                     }
@@ -252,11 +352,12 @@ class FFmpegBatchConvertNode:
             index += 1
         return candidate
 
-
 NODE_CLASS_MAPPINGS = {
+    "OSSInfoNode": OSSInfoNode,
     "FFmpegBatchConvertNode": FFmpegBatchConvertNode,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
+    "OSSInfoNode": "OSS Configuration",
     "FFmpegBatchConvertNode": "FFmpeg Batch Convert (Video -> Audio)",
 }

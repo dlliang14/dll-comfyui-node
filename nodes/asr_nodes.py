@@ -21,7 +21,7 @@ class ParaformerBatchASRNode:
                     {
                         "default": "",
                         "multiline": True,
-                        "placeholder": "one OSS object key per line, e.g. output/abc.mp3",
+                        "placeholder": "one HTTP/HTTPS URL per line (public or presigned)",
                     },
                 ),
                 "language_hints": (
@@ -38,15 +38,6 @@ class ParaformerBatchASRNode:
             },
             "optional": {
                 "api_key": ("STRING", {"default": "", "multiline": False}),
-                "oss_config_json": ("STRING", {"default": ""}),
-                "public_base_url": (
-                    "STRING",
-                    {
-                        "default": "",
-                        "multiline": False,
-                        "placeholder": "optional, e.g. https://cdn.example.com",
-                    },
-                ),
             },
         }
 
@@ -64,8 +55,6 @@ class ParaformerBatchASRNode:
         poll_interval_sec: int,
         timeout_sec: int,
         api_key: str = "",
-        oss_config_json: str = "",
-        public_base_url: str = "",
     ):
         try:
             import dashscope
@@ -82,12 +71,7 @@ class ParaformerBatchASRNode:
                 "Missing DashScope API key. Set api_key input or DASHSCOPE_API_KEY."
             )
 
-        raw_items = [line.strip() for line in audio_urls.splitlines() if line.strip()]
-        resolved_urls = self._resolve_audio_urls(
-            raw_items=raw_items,
-            oss_config_json=oss_config_json,
-            public_base_url=public_base_url,
-        )
+        resolved_urls = self._parse_audio_urls(audio_urls)
 
         hints = [
             item.strip()
@@ -169,46 +153,22 @@ class ParaformerBatchASRNode:
         )
 
     @staticmethod
-    def _resolve_audio_urls(
-        raw_items: List[str],
-        oss_config_json: str,
-        public_base_url: str,
-    ) -> List[str]:
-        if not raw_items:
+    def _parse_audio_urls(audio_urls: str) -> List[str]:
+        resolved = [line.strip() for line in audio_urls.splitlines() if line.strip()]
+        if not resolved:
             return []
 
-        base_url = public_base_url.strip().rstrip("/")
-        oss_config: Dict[str, Any] = {}
-        if oss_config_json.strip():
-            try:
-                oss_config = json.loads(oss_config_json)
-            except json.JSONDecodeError as exc:
-                raise ValueError("Invalid oss_config_json") from exc
-
-        resolved: List[str] = []
-        for item in raw_items:
-            # Backward-compatible path: if a full URL is passed, use it directly.
-            if item.startswith("http://") or item.startswith("https://"):
-                resolved.append(item)
-                continue
-
-            # Primary path: item is an OSS object key.
-            key = item.lstrip("/")
-            if base_url:
-                resolved.append(f"{base_url}/{key}")
-                continue
-
-            endpoint = str(oss_config.get("endpoint", "")).rstrip("/")
-            bucket = str(oss_config.get("bucket_name", "")).strip()
-            if endpoint and bucket:
-                resolved.append(f"{endpoint}/{bucket}/{key}")
-                continue
-
+        invalid = [
+            u
+            for u in resolved
+            if not (u.startswith("http://") or u.startswith("https://"))
+        ]
+        if invalid:
             raise ValueError(
-                f"Input key '{item}' cannot be resolved to a public URL. "
-                "Please provide public_base_url, or pass valid oss_config_json(endpoint + bucket_name)."
+                "audio_urls must be public or presigned HTTP/HTTPS URLs, one per line. "
+                f"Invalid entries: {invalid[:3]}. "
+                "If input comes from media node, set oss_output_mode=presigned_url."
             )
-
         return resolved
 
     @staticmethod

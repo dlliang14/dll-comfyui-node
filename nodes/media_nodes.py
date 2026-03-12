@@ -7,6 +7,7 @@ import uuid
 from pathlib import Path
 from typing import Iterable, List
 
+import boto3
 import imageio_ffmpeg
 
 
@@ -238,6 +239,25 @@ class FFmpegBatchConvertNode:
 
             result = subprocess.run(command, capture_output=True, text=True)
             if result.returncode == 0:
+                # Upload to OSS if configured
+                if use_oss:
+                    assert oss_config is not None
+                    try:
+                        self._upload_to_s3(oss_config, dst_path, dst_oss_path)
+                        dst_path.unlink(missing_ok=True)  # remove temp file
+                    except Exception as exc:
+                        fail_count += 1
+                        report["items"].append(
+                            {
+                                "input": str(src_path),
+                                "output": dst_oss_path,
+                                "status": "failed",
+                                "error": f"OSS upload failed: {exc}",
+                            }
+                        )
+                        if not continue_on_error:
+                            raise
+                        continue
                 success_count += 1
                 output_path = dst_oss_path if use_oss else str(dst_path)
                 assert output_path is not None
@@ -359,6 +379,26 @@ class FFmpegBatchConvertNode:
             candidate = path.with_name(f"{path.stem}_{index}{path.suffix}")
             index += 1
         return candidate
+
+    @staticmethod
+    def _upload_to_s3(oss_config: dict, local_path: Path, oss_key: str) -> None:
+        """Upload a local file to an S3-compatible bucket (Aliyun OSS, Cloudflare R2, AWS S3, etc.).
+
+        oss_config keys:
+            endpoint         - full URL, e.g. https://oss-cn-beijing.aliyuncs.com
+                               or https://<accountid>.r2.cloudflarestorage.com
+            access_key_id    - Access Key ID
+            access_key_secret - Access Key Secret
+            bucket_name      - target bucket
+        """
+        s3 = boto3.client(
+            "s3",
+            endpoint_url=oss_config["endpoint"],
+            aws_access_key_id=oss_config["access_key_id"],
+            aws_secret_access_key=oss_config["access_key_secret"],
+            region_name="auto",
+        )
+        s3.upload_file(str(local_path), oss_config["bucket_name"], oss_key)
 
 
 NODE_CLASS_MAPPINGS = {

@@ -475,11 +475,7 @@ class FFmpegBatchConvertNode:
         key = oss_key.lstrip("/")
         endpoint = endpoint.rstrip("/")
 
-        # endpoint already bucket-style, e.g. https://my-bucket.oss-cn-shanghai.aliyuncs.com
-        if f"//{bucket_name}." in endpoint:
-            return f"{endpoint}/{key}"
-
-        # path-style endpoint, append bucket once
+        # Keep bucket segment in path as requested: endpoint/bucket/key
         return f"{endpoint}/{bucket_name}/{key}"
 
 

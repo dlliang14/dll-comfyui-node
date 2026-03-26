@@ -4,6 +4,7 @@ import json
 import os
 import time
 from http import HTTPStatus
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.error import URLError
 from urllib.parse import quote
@@ -510,12 +511,88 @@ class GeminiTranscriptPolishNode:
         return "\n".join(chunks).strip()
 
 
+class SaveMarkdownTextNode:
+    """Save markdown text to a target directory, overwriting the file if it exists."""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "text": (
+                    "STRING",
+                    {
+                        "default": "",
+                        "multiline": True,
+                        "placeholder": "Markdown text from GeminiTranscriptPolishNode",
+                    },
+                ),
+                "output_dir": (
+                    "STRING",
+                    {
+                        "default": "/root/ComfyUI/input/面试录制/19-苏国峰gpu分享",
+                        "multiline": False,
+                    },
+                ),
+                "file_name": (
+                    "STRING",
+                    {
+                        "default": "{parent_folder}.md",
+                        "multiline": False,
+                    },
+                ),
+            }
+        }
+
+    RETURN_TYPES = ("STRING", "STRING")
+    RETURN_NAMES = ("saved_file_path", "report_json")
+    FUNCTION = "save"
+    CATEGORY = "dlliang14/asr"
+
+    def save(
+        self,
+        text: str,
+        output_dir: str,
+        file_name: str,
+    ):
+        raw_output_dir = (output_dir or "").strip()
+        if not raw_output_dir:
+            raise ValueError("output_dir is required")
+
+        target_dir = Path(raw_output_dir).expanduser()
+
+        target_dir.mkdir(parents=True, exist_ok=True)
+
+        parent_folder = target_dir.name or "output"
+        resolved_name = (
+            file_name or "{parent_folder}.md"
+        ).strip() or "{parent_folder}.md"
+        resolved_name = resolved_name.replace("{parent_folder}", parent_folder)
+        if not resolved_name.lower().endswith(".md"):
+            resolved_name = f"{resolved_name}.md"
+
+        target_file = target_dir / resolved_name
+        existed_before = target_file.exists()
+        target_file.write_text(text or "", encoding="utf-8")
+
+        report = {
+            "status": "success",
+            "output_dir": str(target_dir),
+            "file_name": resolved_name,
+            "saved_file_path": str(target_file),
+            "chars": len(text or ""),
+            "overwritten": existed_before,
+        }
+        return str(target_file), json.dumps(report, ensure_ascii=False, indent=2)
+
+
 NODE_CLASS_MAPPINGS = {
     "ParaformerBatchASRNode": ParaformerBatchASRNode,
     "GeminiTranscriptPolishNode": GeminiTranscriptPolishNode,
+    "SaveMarkdownTextNode": SaveMarkdownTextNode,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "ParaformerBatchASRNode": "Bailian Paraformer Batch ASR",
     "GeminiTranscriptPolishNode": "Gemini Transcript Polish",
+    "SaveMarkdownTextNode": "Save Markdown Text",
 }

@@ -6,6 +6,7 @@ import subprocess
 import uuid
 from pathlib import Path
 from typing import Iterable, List
+from urllib.parse import urlsplit
 
 import boto3
 import imageio_ffmpeg
@@ -481,9 +482,21 @@ class FFmpegBatchConvertNode:
 
         key = oss_key.lstrip("/")
         endpoint = endpoint.rstrip("/")
+        parsed = urlsplit(endpoint)
+        scheme = parsed.scheme or "https"
+        netloc = parsed.netloc
 
-        # Keep bucket segment in path as requested: endpoint/bucket/key
-        return f"{endpoint}/{bucket_name}/{key}"
+        if not netloc:
+            return f"{endpoint}/{bucket_name}/{key}"
+
+        # Aliyun OSS public object URL is typically bucket-host style:
+        # https://<bucket>.oss-cn-xxx.aliyuncs.com/<key>
+        if "aliyuncs.com" in netloc:
+            if netloc.startswith(f"{bucket_name}."):
+                return f"{scheme}://{netloc}/{key}"
+            return f"{scheme}://{bucket_name}.{netloc}/{key}"
+
+        return f"{scheme}://{netloc}/{bucket_name}/{key}"
 
 
 NODE_CLASS_MAPPINGS = {

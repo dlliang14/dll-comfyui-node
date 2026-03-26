@@ -546,6 +546,7 @@ class SaveMarkdownTextNode:
     RETURN_TYPES = ("STRING", "STRING")
     RETURN_NAMES = ("saved_file_path", "report_json")
     FUNCTION = "save"
+    OUTPUT_NODE = True
     CATEGORY = "dlliang14/asr"
 
     def save(
@@ -573,6 +574,7 @@ class SaveMarkdownTextNode:
         target_file = target_dir / resolved_name
         existed_before = target_file.exists()
         target_file.write_text(text or "", encoding="utf-8")
+        print(f"[SaveMarkdownTextNode] Saved markdown to: {target_file}")
 
         report = {
             "status": "success",

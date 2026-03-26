@@ -12,6 +12,13 @@ import imageio_ffmpeg
 from botocore.config import Config
 
 
+def _normalize_endpoint(endpoint: str) -> str:
+    value = (endpoint or "").strip().rstrip("/")
+    if value and "://" not in value:
+        value = f"https://{value}"
+    return value
+
+
 class OSSInfoNode:
     """OSS configuration node - provides endpoint, credentials, and bucket info for other nodes."""
 
@@ -59,7 +66,7 @@ class OSSInfoNode:
         path_prefix: str,
     ):
         config = {
-            "endpoint": endpoint.strip(),
+            "endpoint": _normalize_endpoint(endpoint),
             "access_key_id": access_key_id.strip(),
             "access_key_secret": access_key_secret.strip(),
             "bucket_name": bucket_name.strip(),
@@ -409,7 +416,7 @@ class FFmpegBatchConvertNode:
             access_key_secret - Access Key Secret
             bucket_name      - target bucket
         """
-        endpoint = str(oss_config.get("endpoint", "")).strip()
+        endpoint = _normalize_endpoint(str(oss_config.get("endpoint", "")))
         access_key_id = str(oss_config.get("access_key_id", "")).strip()
         access_key_secret = str(oss_config.get("access_key_secret", "")).strip()
         bucket_name = str(oss_config.get("bucket_name", "")).strip()
@@ -466,7 +473,7 @@ class FFmpegBatchConvertNode:
         oss_config: dict,
         oss_key: str,
     ) -> str:
-        endpoint = str(oss_config.get("endpoint", "")).strip()
+        endpoint = _normalize_endpoint(str(oss_config.get("endpoint", "")))
         bucket_name = str(oss_config.get("bucket_name", "")).strip()
 
         if not endpoint or not bucket_name:

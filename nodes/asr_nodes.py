@@ -1,13 +1,15 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import time
+from datetime import datetime, timezone
 from http import HTTPStatus
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.error import URLError
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit, urlunsplit
 from urllib.request import Request, urlopen
 
 
@@ -40,6 +42,14 @@ class ParaformerBatchASRNode:
             },
             "optional": {
                 "api_key": ("STRING", {"default": "", "multiline": False}),
+                "cache_dir": (
+                    "STRING",
+                    {
+                        "default": "/root/ComfyUI/output/asr_cache",
+                        "multiline": False,
+                    },
+                ),
+                "cache_mode": (("use_cache", "refresh", "cache_only"),),
             },
         }
 
@@ -57,27 +67,14 @@ class ParaformerBatchASRNode:
         poll_interval_sec: int,
         timeout_sec: int,
         api_key: str = "",
+        cache_dir: str = "/root/ComfyUI/output/asr_cache",
+        cache_mode: str = "use_cache",
         oss_config_json: str = "",
         public_base_url: str = "",
         **kwargs: Any,
     ):
         # backward compatibility for old workflows
         _ = (oss_config_json, public_base_url, kwargs)
-
-        try:
-            import dashscope
-            from dashscope.audio.asr import Transcription
-        except Exception as exc:  # pragma: no cover
-            raise RuntimeError(
-                "dashscope is required. Please install dependencies from requirements.txt"
-            ) from exc
-
-        if api_key.strip():
-            dashscope.api_key = api_key.strip()
-        elif not os.getenv("DASHSCOPE_API_KEY"):
-            raise RuntimeError(
-                "Missing DashScope API key. Set api_key input or DASHSCOPE_API_KEY."
-            )
 
         resolved_urls = self._parse_audio_urls(audio_urls)
 
@@ -89,18 +86,58 @@ class ParaformerBatchASRNode:
         if not hints:
             hints = ["zh"]
 
+        resolved_cache_dir = Path(
+            (cache_dir or "/root/ComfyUI/output/asr_cache").strip()
+        ).expanduser()
+        resolved_cache_mode = (cache_mode or "use_cache").strip().lower()
+        if resolved_cache_mode not in {"use_cache", "refresh", "cache_only"}:
+            raise ValueError(
+                "cache_mode must be one of: use_cache, refresh, cache_only"
+            )
+
         report: Dict[str, Any] = {
             "model": model,
             "language_hints": hints,
             "total_inputs": len(resolved_urls),
+            "cache_dir": str(resolved_cache_dir),
+            "cache_mode": resolved_cache_mode,
             "items": [],
         }
         texts: List[str] = []
         transcription_urls: List[str] = []
+        transcription_api = None
 
         for url in resolved_urls:
+            cache_path = self._cache_path(
+                resolved_cache_dir, url=url, model=model, language_hints=hints
+            )
             try:
-                task_resp = Transcription.async_call(
+                if resolved_cache_mode != "refresh":
+                    cached = self._read_cache(cache_path)
+                    if cached is not None:
+                        text = str(cached.get("text", "") or "")
+                        result_url = str(cached.get("transcription_url", "") or "")
+                        texts.append(text)
+                        transcription_urls.append(result_url)
+                        report["items"].append(
+                            {
+                                "input": self._canonical_audio_url(url),
+                                "status": "cached",
+                                "text": text,
+                                "transcription_url": result_url,
+                                "cache_path": str(cache_path),
+                                "cached_at": cached.get("created_at", ""),
+                            }
+                        )
+                        continue
+
+                if resolved_cache_mode == "cache_only":
+                    raise RuntimeError(f"ASR cache miss: {cache_path}")
+
+                if transcription_api is None:
+                    transcription_api = self._load_transcription_api(api_key)
+
+                task_resp = transcription_api.async_call(
                     model=model,
                     file_urls=[url],
                     language_hints=hints,
@@ -111,7 +148,7 @@ class ParaformerBatchASRNode:
                     raise RuntimeError(f"Task submission failed, response: {task_resp}")
 
                 result = self._wait_result(
-                    Transcription=Transcription,
+                    Transcription=transcription_api,
                     task_id=str(task_id),
                     poll_interval_sec=poll_interval_sec,
                     timeout_sec=timeout_sec,
@@ -127,31 +164,54 @@ class ParaformerBatchASRNode:
                     raise RuntimeError("Missing transcription_url in ASR response")
                 texts.append(text)
                 transcription_urls.append(result_url)
+                cache_payload = {
+                    "version": 1,
+                    "created_at": datetime.now(timezone.utc).isoformat(),
+                    "source_url": self._canonical_audio_url(url),
+                    "model": model,
+                    "language_hints": hints,
+                    "text": text,
+                    "transcription_url": result_url,
+                    "task_id": str(task_id),
+                }
+                self._write_cache(cache_path, cache_payload)
                 report["items"].append(
                     {
-                        "input": url,
+                        "input": self._canonical_audio_url(url),
                         "status": "success",
                         "text": text,
                         "transcription_url": result_url,
                         "task_id": str(task_id),
+                        "cache_path": str(cache_path),
                     }
                 )
             except Exception as exc:
                 report["items"].append(
                     {
-                        "input": url,
+                        "input": self._canonical_audio_url(url),
                         "status": "failed",
                         "error": str(exc),
+                        "cache_path": str(cache_path),
                     }
                 )
                 if not continue_on_error:
                     raise
 
         report["success_count"] = len(
-            [i for i in report["items"] if i["status"] == "success"]
+            [
+                i
+                for i in report["items"]
+                if i["status"] in {"success", "cached"}
+            ]
         )
         report["fail_count"] = len(
             [i for i in report["items"] if i["status"] == "failed"]
+        )
+        report["cache_hit_count"] = len(
+            [i for i in report["items"] if i["status"] == "cached"]
+        )
+        report["asr_request_count"] = len(
+            [i for i in report["items"] if i["status"] == "success"]
         )
 
         return (
@@ -159,6 +219,71 @@ class ParaformerBatchASRNode:
             "\n".join(transcription_urls),
             json.dumps(report, ensure_ascii=False, indent=2),
         )
+
+    @staticmethod
+    def _load_transcription_api(api_key: str) -> Any:
+        try:
+            import dashscope
+            from dashscope.audio.asr import Transcription
+        except Exception as exc:  # pragma: no cover
+            raise RuntimeError(
+                "dashscope is required. Please install dependencies from requirements.txt"
+            ) from exc
+
+        if api_key.strip():
+            dashscope.api_key = api_key.strip()
+        elif not os.getenv("DASHSCOPE_API_KEY"):
+            raise RuntimeError(
+                "Missing DashScope API key. Set api_key input or DASHSCOPE_API_KEY."
+            )
+        return Transcription
+
+    @staticmethod
+    def _canonical_audio_url(url: str) -> str:
+        """Remove temporary credentials while retaining stable object identity."""
+        parts = urlsplit(url.strip())
+        return urlunsplit((parts.scheme.lower(), parts.netloc.lower(), parts.path, "", ""))
+
+    @staticmethod
+    def _cache_path(
+        cache_dir: Path,
+        url: str,
+        model: str,
+        language_hints: List[str],
+    ) -> Path:
+        identity = {
+            "version": 1,
+            "url": ParaformerBatchASRNode._canonical_audio_url(url),
+            "model": (model or "").strip(),
+            "language_hints": language_hints,
+        }
+        digest = hashlib.sha256(
+            json.dumps(
+                identity, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+            ).encode("utf-8")
+        ).hexdigest()
+        return cache_dir / f"{digest}.json"
+
+    @staticmethod
+    def _read_cache(cache_path: Path) -> Optional[Dict[str, Any]]:
+        try:
+            payload = json.loads(cache_path.read_text(encoding="utf-8"))
+        except (FileNotFoundError, OSError, ValueError, TypeError):
+            return None
+        if not isinstance(payload, dict) or not isinstance(payload.get("text"), str):
+            return None
+        return payload
+
+    @staticmethod
+    def _write_cache(cache_path: Path, payload: Dict[str, Any]) -> None:
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        temporary_path = cache_path.with_name(
+            f".{cache_path.name}.{os.getpid()}.tmp"
+        )
+        temporary_path.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        os.replace(temporary_path, cache_path)
 
     @staticmethod
     def _parse_audio_urls(audio_urls: str) -> List[str]:

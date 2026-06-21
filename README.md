@@ -37,6 +37,22 @@
 - `fail_count`: 失败数量
 - `report_json`: 结构化 JSON 报告
 
+## Paraformer 转写缓存
+
+`ParaformerBatchASRNode` 会将成功的转写结果保存为 JSON。默认缓存目录是：
+
+```text
+/root/ComfyUI/output/asr_cache
+```
+
+缓存文件不会被节点自动删除。缓存键由音频 URL（忽略临时签名参数）、模型和语言提示共同生成。
+
+- `use_cache`：优先读取缓存；未命中时调用 Paraformer，并保存结果。
+- `refresh`：忽略已有缓存，重新调用 Paraformer并覆盖对应缓存。
+- `cache_only`：只读取缓存，绝不调用 Paraformer；未命中时在报告中返回失败。
+
+缓存命中后，`texts` 输出就是已保存的转写文本，可以直接连接预览或文本保存节点，不必连接 Gemini。`report_json` 会提供 `cache_path`、`cache_hit_count` 和 `asr_request_count`。
+
 ## Linux Pod + Windows UI 场景建议
 - UI 中路径请使用容器内路径，例如 `/data/input`、`/data/output`
 - 不要传 Windows 盘符路径
